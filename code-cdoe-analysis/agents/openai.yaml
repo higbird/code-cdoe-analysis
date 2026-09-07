@@ -1,4 +1,0 @@
-interface:
-  display_name: "Code Cdoe Analysis"
-  short_description: "组织、运行和验证轻量可复现的科研数据分析项目与工作流"
-  default_prompt: "使用 $code-cdoe-analysis 整理、运行并验证这个科研分析项目。"
