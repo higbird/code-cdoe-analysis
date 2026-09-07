@@ -43,13 +43,13 @@
 将仓库目录复制到 Codex 的个人 skills 目录：
 
 ```text
-~/.codex/skills/code-cdoe-analysis/
+~/.codex/skills/code-cdoe-skill/
 ```
 
 安装后应保留以下路径：
 
 ```text
-code-cdoe-analysis/
+code-cdoe-skill/
 ├── SKILL.md
 ├── agents/
 │   └── openai.yaml
@@ -64,7 +64,7 @@ code-cdoe-analysis/
 重新启动或新建 Codex 任务后，可以显式调用：
 
 ```text
-$code-cdoe-analysis 请整理并验证这个科研分析项目。
+$code-cdoe-skill 请整理并验证这个科研分析项目。
 ```
 
 skill 也允许根据任务内容自动触发。
@@ -72,15 +72,15 @@ skill 也允许根据任务内容自动触发。
 ## 使用示例
 
 ```text
-$code-cdoe-analysis 为这批 GWAS 输入建立一个可重复运行的分析模块，生成关联结果和 Manhattan 图。
+$code-cdoe-skill 为这批 GWAS 输入建立一个可重复运行的分析模块，生成关联结果和 Manhattan 图。
 ```
 
 ```text
-$code-cdoe-analysis 修复当前 R 分析的所有分组标签问题，重跑受影响的表格和图，并确认结果来自本次运行。
+$code-cdoe-skill 修复当前 R 分析的所有分组标签问题，重跑受影响的表格和图，并确认结果来自本次运行。
 ```
 
 ```text
-$code-cdoe-analysis 检查 README 与代码中的 FDR、协变量和 PC 数是否一致；能确认的直接修正并重跑，影响科学含义但无法判断的冲突请指出。
+$code-cdoe-skill 检查 README 与代码中的 FDR、协变量和 PC 数是否一致；能确认的直接修正并重跑，影响科学含义但无法判断的冲突请指出。
 ```
 
 ## 默认模块形式
