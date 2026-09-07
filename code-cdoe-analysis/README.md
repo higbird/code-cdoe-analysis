@@ -1,4 +1,4 @@
-# Code Cdoe Analysis
+# code-cdoe-skill
 
 一套面向科研数据分析 Agent 的轻量工作规范，附带可选 Python 执行工具，用于组织、修改、运行和验证以 Bash、R、Python 或混合工具完成的分析项目。
 
