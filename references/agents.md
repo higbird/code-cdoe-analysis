@@ -9,7 +9,7 @@
 区分三个位置：
 
 - skill 根：本次加载的 `SKILL.md` 所在位置，用来查找运行器、参考文档和示例。
-- 项目根：`workflow.json` 所在位置，运行器以此解析分析输入、源码、输出和状态。
+- 项目根：分析模块目录，顶层为 `input/`、`output/`、`code.txt`、`readme.md`。配置放在 `input/workflow.json`，运行器通过 `--root` 明确此模块目录，以它解析输入、源码、输出和状态；状态在 `output/.analysis-state/`。
 - 执行环境：真正执行 Python/R/Bash 的本机、容器或远程主机，决定可见路径与可用依赖。
 
 先使用项目已配置的 Python、conda 或虚拟环境。没有项目约定时，确认可用 Python 为 3.11+ 后再调用；`python` 只是示例名。R 或 Bash 仅在被调分析使用它们时需要。不要硬编码开发者机器的解释器路径。
@@ -25,16 +25,16 @@ Hermes Agent：可通过 `skill_view` 加载 skill 与支持文件。读取成�
 POSIX shell：
 
 ```sh
-"/path/to/python" "/path/to/code-cdoe-skill/scripts/analysis_workflow.py" plan "/path/to/project/workflow.json"
+"/path/to/python" "/path/to/code-cdoe-skill/scripts/analysis_workflow.py" plan "/path/to/project/input/workflow.json" --root "/path/to/project"
 ```
 
 PowerShell：
 
 ```powershell
-& 'C:/path/to/python.exe' 'C:/path/to/code-cdoe-skill/scripts/analysis_workflow.py' plan 'D:/path/to/project/workflow.json'
+& 'C:/path/to/python.exe' 'C:/path/to/code-cdoe-skill/scripts/analysis_workflow.py' plan 'D:/path/to/project/input/workflow.json' --root 'D:/path/to/project'
 ```
 
-`plan` 只生成计划；实际生成结果使用 `run`，随后再 `plan` 核对是否可跳过。分析命令在 JSON 中使用参数数组，避免把命令拼接成某个 shell 专属字符串。完整参数和保护边界见 [工具说明](tools.md)。
+以上展示运行器接口；生成的模块通过 `code.txt` 统一调度，示例使用 `python code.txt --skill-root <skill目录> [run|plan|recover]`。`plan` 只生成计划；实际生成结果使用 `run`，随后再 `plan` 核对是否可跳过。分析命令在 JSON 中使用参数数组，避免把命令拼接成某个 shell 专属字符串。完整参数和保护边界见 [工具说明](tools.md)。
 
 ## 验证与证据边界
 
@@ -44,14 +44,14 @@ PowerShell：
 python -B -m unittest discover -s <skill>/tests -v
 ```
 
-可移植性用例将完整技能复制到三种安装目录形状，在另一个含空格及中文路径的项目中运行合成示例，并检查数据、图件、凭据和再次计划跳过。也覆盖不带 `agents/openai.yaml` 的运行。它验证资源可重定位及程序独立性，不模拟客户端的技能发现、权限控制或模型行为。
+可移植性用例将完整技能复制到三种安装目录形状，在另一个含空格及中文路径的项目中运行合成示例，并检查数据、图件、output 内的凭据、再次计划跳过，以及运行前后顶层严格只有四项。也覆盖不带 `agents/openai.yaml` 的运行。它验证资源可重定位及程序独立性，不模拟客户端的技能发现、权限控制或模型行为。
 
 安装后的客户端验收：
 
 1. 新建会话，确认技能列表包含 `code-cdoe-skill`，显式调用并核对实际加载位置。
-2. 请 Agent 读取 `assets/minimal/README.md`，将整个合成示例复制到单独的可写项目目录。
-3. 请 Agent 运行 `plan`、`run`、`plan`，检查 `summary.tsv`、`means.svg` 和阶段凭据；第二次计划两阶段都应为 `skip`。
-4. 修改示例的 `plot.params.title`，检查只需重跑 plot，运行后核对图件标题。
+2. 请 Agent 读取 `assets/minimal/readme.md`，将整个合成示例复制到单独的可写项目目录。
+3. 请 Agent 通过 `code.txt` 运行 `plan`、`run`、`plan`，确认模块顶层只保留四项，检查 `summary.tsv`、`means.svg` 和阶段凭据；第二次计划两阶段都应为 `skip`。
+4. 修改示例 `input/workflow.json` 的 `plot.params.title`，检查只需重跑 plot，运行后核对图件标题。
 
 无终端或缺少依赖时可以提供检查与修改建议，但要如实标注未执行部分。真实科学数据、R/Bash 环境和不同远程后端仍需各自验收。
 

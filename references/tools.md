@@ -8,16 +8,18 @@
 
 先检查现有脚本能否接受输出目录和参数。只有脚本能将本次产物全部写入指定临时目录，才可以声称享有这里的安全替换保护。
 
-工作目录以 `workflow.json` 所在目录为根。项目的正式产物位于该根目录的 `output/`。已有项目如果使用其他输出布局，应继续使用原流程，或仅在用户授权的改造范围内接入。一个阶段是一组一起更新的产物，不一定要拆成新目录。
+新建或整理的模块将配置放在 `input/workflow.json`，用 `--root` 显式指定模块根目录；输入、源码和命令按该根目录解析，正式产物位于 `output/`，运行状态位于 `output/.analysis-state/`。工具本身不创建四项模块骨架，应由 Agent 或模板建立 `input/`、`output/`、`code.txt`、`readme.md`，并由 `code.txt` 统一调度。
 
-以下命令中的 Python 使用项目环境；`<skill>` 替换成该 skill 的实际目录。PowerShell 中带空格或绝对路径的解释器应使用调用运算符 `&`。
+为兼容已有配置，省略 `--root` 时仍按配置所在目录解析项目根；新布局必须传模块根，不能省略。一个阶段是一组一起更新的产物，不一定要拆成新目录。只修改或重跑已有项目时，不自动迁移其布局。
+
+以下是运行器接口命令，工作目录为模块根；日常使用以 `code.txt` 中声明的入口为准。命令中的 Python 使用项目环境；`<skill>` 替换成该 skill 的实际目录。PowerShell 中带空格或绝对路径的解释器应使用调用运算符 `&`。
 
 ```text
-python <skill>/scripts/analysis_workflow.py check checks.json
-python <skill>/scripts/analysis_workflow.py plan workflow.json
-python <skill>/scripts/analysis_workflow.py run workflow.json
-python <skill>/scripts/analysis_workflow.py run workflow.json --target plot
-python <skill>/scripts/analysis_workflow.py run workflow.json --force --target analysis
+python <skill>/scripts/analysis_workflow.py check input/checks.json --root .
+python <skill>/scripts/analysis_workflow.py plan input/workflow.json --root .
+python <skill>/scripts/analysis_workflow.py run input/workflow.json --root .
+python <skill>/scripts/analysis_workflow.py run input/workflow.json --root . --target plot
+python <skill>/scripts/analysis_workflow.py run input/workflow.json --root . --force --target analysis
 ```
 
 - `check`：只读检查明确声明的文件；默认按检查配置所在目录解析路径，可用 `--root` 指定基准。显式配置 fingerprint 时也会计算对应指纹。
@@ -27,11 +29,11 @@ python <skill>/scripts/analysis_workflow.py run workflow.json --force --target a
 - `--force`：强制重跑本次选中的阶段集合。未给 target 时选中全部阶段。
 - CLI 成功返回 0，配置、检查或执行失败返回 1，中断返回 130。分析命令的退出码写入成功凭据，非零退出写入失败证据。
 
-可复制 [最小示例](../assets/minimal/workflow.json) 所在文件夹到独立工作目录试运行。示例是合成数据的分组均值和 SVG 条形图，不代表任何真实研究结果。
+可复制整个 [最小示例目录](../assets/minimal/readme.md) 到独立工作目录，通过 `python code.txt --skill-root <skill目录> run` 试运行。不要只复制配置所在的 input 文件夹。示例是合成数据的分组均值和 SVG 条形图，不代表任何真实研究结果。
 
 ## 文件检查配置
 
-`checks.json` 只有一个顶层字段：
+需要独立检查配置时使用 `input/checks.json`，其中只有一个顶层字段：
 
 ```json
 {
@@ -126,14 +128,14 @@ run 逐阶段重新判断；plan 对已安排重跑的上游之下的阶段标�
 
 **恢复日志始终保留独立的严格 SHA-256 校验。** 即使输出选择 stat 或 external，覆盖已有正式文件前仍会完整哈希该旧文件，恢复时也会校验备份。这部分读取成本保留，不能宣称低成本模式消除了所有大文件读取。
 
-workflow 配置版本仍为 1，兼容原来的配置和严格默认值；新增字段要求新版工具。成功运行凭据升级为 version=2。旧版凭据不能作为跳过依据：首次运行会标记重跑，成功前保留旧结果与凭据。恢复日志格式未改变，旧版未完成事务仍使用原有严格校验恢复。不要通过手工修改版本号“升级”凭据。
+workflow 配置版本仍为 1，兼容原来的配置和严格默认值；新增字段要求新版工具。成功运行凭据升级为 version=2。旧版凭据不能作为跳过依据：首次运行会标记重跑，成功前保留旧结果与凭据。恢复日志格式仍支持严格校验；旧根目录状态的保护与恢复见下节。不要通过手工修改版本号“升级”凭据。
 
 指纹模式、验证等级及规则变化会改变阶段签名，触发重跑及必要下游更新。成本测试使用合成数据、读取计数及模拟的大文件元数据，不代表已完成真实 100 GB 数据吞吐测试。
 
 
 ## 工作流配置
 
-顶层结构为 `{"version": 1, "stages": [...]}`。每个阶段的完整用法见 [示例配置](../assets/minimal/workflow.json)。
+顶层结构为 `{"version": 1, "stages": [...]}`。每个阶段的完整用法见 [示例配置](../assets/minimal/input/workflow.json)。
 
 | 字段 | 必需 | 说明 |
 |---|---|---|
@@ -147,7 +149,7 @@ workflow 配置版本仍为 1，兼容原来的配置和严格默认值；新增
 | `versions` | 否 | 工具名到版本查询 argv 数组；查询超时 15 秒或非零退出会失败。 |
 | `timeout` | 否 | 分析主进程的正数秒数上限；省略表示不设超时。不是集群作业监控器。 |
 
-规则中未识别的字段会被拒绝，避免拼写错误被静默忽略。输入和源码可通过项目内链接引用外部文件；输出和状态目录的路径组件禁止符号链接、Windows junction/reparse point。
+规则中未识别的字段会被拒绝，避免拼写错误被静默忽略。输入和源码可通过项目内链接引用外部文件；输出和状态目录的路径组件禁止符号链接、Windows junction/reparse point。`output/.analysis-state/` 是运行器专用路径，outputs 不能声明 `.analysis-state` 或其下的文件，大小写变化也不能绕过此限制。
 
 多个阶段不得声明同一输出文件，大小写不同或文件/目录前缀冲突也被拒绝。读取 `output/x` 的阶段必须声明相应生产阶段为上游（允许传递依赖）。涉及文件别名、链接、目录型数据集或网络资源的隐式依赖不能自动推断；应显式列出真实依赖，无法完整声明时不得依据 skip 宣称结果有效。
 
@@ -172,7 +174,7 @@ Python 可用 `json.loads(os.environ["ANALYSIS_PARAMS"])`；R 可用项目已有
 一次阶段运行按以下顺序进行：
 
 1. 校验声明的输入，记录源码、输入、参数、环境查询结果和解释器标识。
-2. 在 `.analysis-state/transactions/<run_id>/output/` 空目录运行。
+2. 在 `output/.analysis-state/transactions/<run_id>/output/` 空目录运行。
 3. 检查每个声明产物，并重新核对输入、源码和环境是否变化。
 4. 将产物和成功凭据作为同一个恢复事务替换；先保存各原文件，再逐个替换。
 5. 成功后删除本次专属临时目录；保留最新成功凭据。
@@ -184,10 +186,10 @@ Python 可用 `json.loads(os.environ["ANALYSIS_PARAMS"])`；R 可用项目已有
 - 强制结束、超时或中断：可能保留锁。**先确认本工具及其子程序均已停止**，再运行：
 
 ```text
-python <skill>/scripts/analysis_workflow.py recover workflow.json --confirm-stopped
+python <skill>/scripts/analysis_workflow.py recover input/workflow.json --root . --confirm-stopped
 ```
 
-该标记是操作者对进程状态的明确确认，不能由等待超时推定。recover 根据事务日志恢复未完成的替换，校验备份内容；缺失或损坏的备份不会被假称为恢复成功。已完成的恢复可以重复执行。配置内容损坏时仍可用原配置路径定位项目根并恢复。失败与暂存证据默认保留，定位结束后只清理已确认属于该次运行的精确路径。
+该标记是操作者对进程状态的明确确认，不能由等待超时推定。recover 根据事务日志恢复未完成的替换，校验备份内容；缺失或损坏的备份不会被假称为恢复成功。已完成的恢复可以重复执行。配置内容损坏时仍可用原配置路径和一致的 `--root` 定位项目根并恢复。失败与暂存证据默认保留，定位结束后只清理已确认属于该次运行的精确路径。
 
 保护范围与限制：
 
@@ -198,9 +200,19 @@ python <skill>/scripts/analysis_workflow.py recover workflow.json --confirm-stop
 - 同一项目根由 lock.json 防止本工具并发写入；不自动解除旧锁，不防止第三方程序直接写入目录。
 - managed 状态仅供本工具维护，勿手工编辑事务日志或把其当作用户文档目录。
 
+### 旧顶层状态目录
+
+检测到旧版根目录 `.analysis-state/` 时，plan、run 和默认 recover 会报错，不会忽略旧锁或事务，也不会自动迁移、删除证据。先确认原进程及其子程序已停止，核对旧配置和项目根，再显式恢复旧状态：
+
+```text
+python <skill>/scripts/analysis_workflow.py recover <原配置路径> --root <原项目根> --legacy-state --confirm-stopped
+```
+
+如果新旧状态目录并存，旧状态恢复也会拒绝，需先核对两者对应的运行，不能通过删锁或覆盖目录消除冲突。恢复成功并不自动完成目录迁移；旧凭据、失败证据和已完成事务可能包含旧路径，不能承诺直接移动目录即可继续复用。确认无未完成事务后，按已授权的整理范围保留并归位旧证据，再使用新布局运行；未处理的旧状态会继续阻塞运行。
+
 ## 运行凭据与重跑判断
 
-`.analysis-state/receipts/<stage>.json` 保存该阶段最新一次成功运行的：
+`output/.analysis-state/receipts/<stage>.json` 保存该阶段最新一次成功运行的：
 
 - run_id、起止 UTC 时间、展开后的实际命令、退出码；
 - 输入的实际指纹模式及证据、源码 SHA-256 和大小、完整声明参数与校验规则；

@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 
 VERSION = 1
 RECEIPT_VERSION = 2
-STATE = ".analysis-state"
+LEGACY_STATE = ".analysis-state"
+STATE = "output/.analysis-state"
 
 
 class WorkflowError(Exception):
@@ -314,8 +315,22 @@ def assert_checks(root, rules):
     return results
 
 
-def load_manifest(path):
-    root = path.resolve().parent
+def project_root(path, root=None):
+    root = (root if root is not None else path.resolve().parent).resolve()
+    require(root.is_dir(), f"Project root is not a directory: {root}")
+    return root
+
+
+def require_current_state(root):
+    require(not os.path.lexists(root / LEGACY_STATE),
+            "Legacy .analysis-state exists; no state was migrated or ignored. "
+            "Inspect it and, only after confirming all workflow/child processes stopped, use "
+            "recover --legacy-state --confirm-stopped with the same --root. "
+            "Resolve the legacy layout explicitly before using plan/run.")
+
+
+def load_manifest(path, root=None):
+    root = project_root(path, root)
     cfg = read_json(path)
     keys(cfg, ("version", "stages"), "manifest")
     require(cfg.get("version") == VERSION and type(cfg["version"]) is int, "Unsupported manifest version")
@@ -361,6 +376,8 @@ def load_manifest(path):
                 require(rule["checksum"].casefold() in output_names, "Output checksum must also be a declared output of this stage")
         for rule in stage["outputs"]:
             target = rule["path"].casefold()
+            require(target.split("/", 1)[0] != LEGACY_STATE,
+                    f"Output overlaps protected runner state: {rule['path']}")
             require(all(target != prior and not target.startswith(prior + "/")
                         and not prior.startswith(target + "/") for prior in owned),
                     f"Overlapping output ownership: {target}")
@@ -391,9 +408,11 @@ def load_manifest(path):
                 if name.startswith("output/"):
                     producer = owned.get(name[7:])
                     require(producer in ancestors[sid], f"{sid}: output input needs a declared upstream producer: {name}")
-                require(not name.startswith(STATE + "/"), "State cannot be an analysis input")
+                require(not any(name == state or name.startswith(state + "/")
+                                for state in (STATE, LEGACY_STATE)), "State cannot be an analysis input")
         for code in stages[sid]["code"]:
-            require(not code.casefold().startswith(("output/", STATE + "/")), "Code cannot be managed output/state")
+            require(not code.casefold().startswith(("output/", LEGACY_STATE + "/"))
+                    and code.casefold() not in ("output", LEGACY_STATE), "Code cannot be managed output/state")
     return root, stages, order, ancestors
 
 
@@ -462,6 +481,7 @@ def targets(order, ancestors, selected):
 
 
 def plan(root, stages, order, cache, force=False):
+    require_current_state(root)
     result, pending = [], set()
     for sid in order:
         stage = stages[sid]
@@ -505,6 +525,7 @@ def plan(root, stages, order, cache, force=False):
 
 
 def lock(root):
+    require_current_state(root)
     path = guarded(root, STATE + "/lock.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -515,7 +536,7 @@ def lock(root):
     return path
 
 
-def rollback(root, transaction, journal):
+def rollback(root, transaction, journal, state=STATE):
     """Restore every original, even if termination occurred between rename and journal update."""
     require(journal.get("status") in ("prepared", "committed"), "Invalid transaction status")
     entries = journal.get("entries")
@@ -523,7 +544,11 @@ def rollback(root, transaction, journal):
     for index, item in reversed(list(enumerate(entries))):
         keys(item, ("target", "existed", "original"), "transaction entry")
         name = relative(item["target"])
-        require(name.startswith(("output/", STATE + "/receipts/")), "Invalid recovery target")
+        target = name.casefold()
+        is_receipt = name.startswith(state + "/receipts/")
+        is_output = name.startswith("output/") and not (
+            target == STATE or target.startswith(STATE + "/"))
+        require(is_receipt or is_output, "Invalid recovery target")
         destination = guarded(root, name)
         saved = guarded(root, transaction.relative_to(root).as_posix() + f"/backup/{index}")
         if item["existed"]:
@@ -632,10 +657,17 @@ def unresolved(root):
     return pending
 
 
-def recover(root, confirmed):
+def recover(root, confirmed, legacy_state=False):
     require(confirmed, "Recovery requires --confirm-stopped after confirming no workflow/child process is active")
-    guarded(root, STATE)
-    base = guarded(root, STATE + "/transactions")
+    if legacy_state:
+        require(not os.path.lexists(root / STATE),
+                "Both state layouts exist; inspect manually before legacy recovery to avoid overwriting newer outputs")
+        require(os.path.lexists(root / LEGACY_STATE), "No legacy .analysis-state exists")
+    else:
+        require_current_state(root)
+    state = LEGACY_STATE if legacy_state else STATE
+    guarded(root, state)
+    base = guarded(root, state + "/transactions")
     recovered = []
     if base.exists():
         for folder in sorted(base.iterdir()):
@@ -645,14 +677,17 @@ def recover(root, confirmed):
             if journal_path.exists():
                 journal = read_json(journal_path)
                 if journal.get("status") != "committed":
-                    rollback(root, folder, journal)
+                    rollback(root, folder, journal, state)
                     journal["status"] = "committed"
                     write_json(journal_path, journal)
                     recovered.append(folder.name)
-    marker = guarded(root, STATE + "/lock.json")
+    marker = guarded(root, state + "/lock.json")
     if marker.exists():
         marker.unlink()
-    return {"recovered": recovered, "note": "Failure/staging evidence retained; previous outputs restored where needed."}
+    note = "Failure/staging evidence retained; previous outputs restored where needed."
+    if legacy_state:
+        note += " Legacy state retained; plan/run remain blocked until the legacy layout is explicitly resolved."
+    return {"recovered": recovered, "state": state, "note": note}
 
 
 def main(argv=None):
@@ -664,11 +699,14 @@ def main(argv=None):
     for name in ("plan", "run", "recover"):
         item = sub.add_parser(name)
         item.add_argument("manifest", type=Path)
+        item.add_argument("--root", type=Path, help="Project root; defaults to the manifest's parent directory")
         if name in ("plan", "run"):
             item.add_argument("--target", action="append", help="Include this stage and its ancestors; repeatable")
             item.add_argument("--force", action="store_true")
         else:
             item.add_argument("--confirm-stopped", action="store_true")
+            item.add_argument("--legacy-state", action="store_true",
+                              help="Explicitly recover root .analysis-state without migrating or deleting it")
     args = parser.parse_args(argv)
     try:
         if args.action == "check":
@@ -684,9 +722,11 @@ def main(argv=None):
             print(json.dumps(results, ensure_ascii=False, indent=2))
             return 0 if all(x["ok"] for x in results) else 1
         if args.action == "recover":
-            print(json.dumps(recover(args.manifest.resolve().parent, args.confirm_stopped), ensure_ascii=False, indent=2))
+            print(json.dumps(recover(project_root(args.manifest, args.root), args.confirm_stopped,
+                                     args.legacy_state), ensure_ascii=False, indent=2))
             return 0
-        root, stages, order, ancestors = load_manifest(args.manifest)
+        root, stages, order, ancestors = load_manifest(args.manifest, args.root)
+        require_current_state(root)
         require(not guarded(root, STATE + "/lock.json").exists() and not unresolved(root),
                 "Unfinished/active workflow; inspect it before recovery")
         order = targets(order, ancestors, args.target)

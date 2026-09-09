@@ -73,8 +73,8 @@ class WorkflowTests(unittest.TestCase):
     def current(self):
         return {p.relative_to(self.root).as_posix(): p.read_bytes() for p in
                 [self.root / "output/stats.tsv", self.root / "output/plot.svg",
-                 self.root / ".analysis-state/receipts/analysis.json",
-                 self.root / ".analysis-state/receipts/plot.json"] if p.exists()}
+                 self.root / "output/.analysis-state/receipts/analysis.json",
+                 self.root / "output/.analysis-state/receipts/plot.json"] if p.exists()}
 
     def test_run_skip_and_receipt(self):
         self.assertEqual(self.call(), 0)
@@ -87,7 +87,121 @@ class WorkflowTests(unittest.TestCase):
         before = self.current()
         self.assertEqual(self.call(), 0)
         self.assertEqual(before, self.current())
-        self.assertFalse((self.root / ".analysis-state/lock.json").exists())
+        self.assertFalse((self.root / "output/.analysis-state/lock.json").exists())
+
+    def test_explicit_root_keeps_four_top_level_entries_and_plan_read_only(self):
+        self.manifest.unlink()
+        self.manifest = self.root / "input/workflow.json"
+        (self.root / "analysis.py").rename(self.root / "code.txt")
+        (self.root / "plot.py").rename(self.root / "input/plot.py")
+        (self.root / "readme.md").write_text("Synthetic test project")
+        for stage, source in zip(self.cfg["stages"], ("code.txt", "input/plot.py")):
+            stage["code"] = [source]
+            stage["command"] = ["{python}", "{root}/" + source]
+        self.save()
+        before = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*"))
+        self.assertEqual(self.call("plan", "--root", str(self.root)), 0)
+        self.assertEqual(before, sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*")))
+        self.assertEqual(self.call("run", "--root", str(self.root)), 0)
+        self.assertEqual({p.name for p in self.root.iterdir()}, {"input", "output", "code.txt", "readme.md"})
+        self.assertTrue((self.root / "output/.analysis-state/receipts/analysis.json").is_file())
+        self.assertFalse((self.root / "input/output").exists())
+        root, stages, order, _ = workflow.load_manifest(self.manifest, self.root)
+        self.assertEqual([x["action"] for x in workflow.plan(root, stages, order, {})], ["skip", "skip"])
+        workflow.lock(self.root)
+        self.manifest.write_text("broken manifest")
+        self.assertEqual(self.call("recover", "--root", str(self.root), "--confirm-stopped"), 0)
+        self.assertFalse((self.root / "output/.analysis-state/lock.json").exists())
+
+    def test_manifest_parent_root_default_remains_compatible(self):
+        self.assertEqual(workflow.load_manifest(self.manifest)[0], self.root)
+        self.assertEqual(self.call(), 0)
+        self.assertFalse((self.root / ".analysis-state").exists())
+        self.assertTrue((self.root / "output/.analysis-state/receipts/analysis.json").exists())
+        self.assertEqual(self.call("plan", "--root", str(self.root / "missing")), 1)
+
+    def test_output_state_namespace_is_protected(self):
+        for name in (".analysis-state", ".analysis-state/lock.json",
+                     ".analysis-state/receipts/analysis.json", ".ANALYSIS-STATE/transactions/test"):
+            with self.subTest(name=name):
+                self.cfg["stages"][0]["outputs"] = [{"path": name}]
+                self.save()
+                self.assertEqual(self.call("plan"), 1)
+                self.assertEqual(self.call("run"), 1)
+                self.assertFalse((self.root / "output").exists())
+
+    def test_legacy_state_blocks_default_actions_without_changes(self):
+        legacy = self.root / ".analysis-state"
+        legacy.mkdir()
+        (legacy / "lock.json").write_text('{"pid": 123}')
+        (legacy / "evidence.txt").write_text("retain")
+        before = {p.relative_to(self.root).as_posix(): p.read_bytes()
+                  for p in self.root.rglob("*") if p.is_file()}
+        for action, flags in (("plan", ()), ("run", ()), ("recover", ("--confirm-stopped",))):
+            with self.subTest(action=action):
+                errors = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                    self.assertEqual(workflow.main([action, str(self.manifest), *flags]), 1)
+                self.assertIn("Legacy .analysis-state exists", errors.getvalue())
+        self.assertEqual(before, {p.relative_to(self.root).as_posix(): p.read_bytes()
+                                 for p in self.root.rglob("*") if p.is_file()})
+        self.assertFalse((self.root / "output").exists())
+        self.assertEqual(self.call("recover", "--legacy-state"), 1)
+        self.assertEqual(self.call("recover", "--legacy-state", "--confirm-stopped"), 0)
+        self.assertFalse((legacy / "lock.json").exists())
+        self.assertEqual((legacy / "evidence.txt").read_text(), "retain")
+        self.assertEqual(self.call("plan"), 1)  # Recovery never silently migrates the old layout.
+
+    def test_legacy_recovery_restores_old_output_and_receipt(self):
+        self.manifest.unlink()
+        self.manifest = self.root / "input/workflow.json"
+        self.save()
+        output = self.root / "output/stats.tsv"
+        output.parent.mkdir()
+        output.write_text("old output")
+        record = self.root / ".analysis-state/receipts/analysis.json"
+        record.parent.mkdir(parents=True)
+        record.write_text("old receipt")
+        transaction = self.root / ".analysis-state/transactions" / ("d" * 32)
+        (transaction / "backup").mkdir(parents=True)
+        entries = []
+        for index, target in enumerate((output, record)):
+            entries.append({"target": target.relative_to(self.root).as_posix(), "existed": True,
+                            "original": workflow.snapshot(target)})
+            os.replace(target, transaction / "backup" / str(index))
+            target.write_text("partial publication")
+        workflow.write_json(transaction / "journal.json", {"status": "prepared", "entries": entries})
+        flags = ("--root", str(self.root), "--legacy-state", "--confirm-stopped")
+        self.assertEqual(self.call("run", "--root", str(self.root)), 1)  # Also blocks when no old lock remains.
+        self.assertEqual(self.call("recover", *flags), 0)
+        self.assertEqual(output.read_text(), "old output")
+        self.assertEqual(record.read_text(), "old receipt")
+        self.assertTrue((transaction / "journal.json").exists())
+        self.assertEqual(self.call("recover", *flags), 0)
+        self.assertFalse((self.root / "output/.analysis-state").exists())
+
+    def test_legacy_recovery_refuses_coexisting_state_layouts(self):
+        old = self.root / ".analysis-state/lock.json"
+        new = self.root / "output/.analysis-state/lock.json"
+        for marker in (old, new):
+            marker.parent.mkdir(parents=True)
+            marker.write_text("retain lock")
+        self.assertEqual(self.call("recover", "--legacy-state", "--confirm-stopped"), 1)
+        self.assertEqual(self.call("recover", "--confirm-stopped"), 1)
+        self.assertEqual(self.call("plan"), 1)
+        for marker in (old, new):
+            self.assertEqual(marker.read_text(), "retain lock")
+
+    def test_recovery_journal_cannot_overwrite_internal_state(self):
+        transaction = self.root / "output/.analysis-state/transactions" / ("e" * 32)
+        transaction.mkdir(parents=True)
+        marker = workflow.lock(self.root)
+        for target in ("output/.analysis-state/lock.json", "output/.ANALYSIS-STATE/transactions/x"):
+            with self.subTest(target=target):
+                workflow.write_json(transaction / "journal.json", {"status": "prepared", "entries": [
+                    {"target": target, "existed": False}]})
+                self.assertEqual(self.call("recover", "--confirm-stopped"), 1)
+                self.assertTrue(marker.exists())
 
     def test_plot_parameter_does_not_rerun_analysis(self):
         self.assertEqual(self.call(), 0)
@@ -129,7 +243,7 @@ class WorkflowTests(unittest.TestCase):
             "raise SystemExit(7)\n")
         self.assertEqual(self.call(), 1)
         self.assertEqual(before, self.current())
-        self.assertTrue(list((self.root / ".analysis-state/transactions").glob("*/failure.json")))
+        self.assertTrue(list((self.root / "output/.analysis-state/transactions").glob("*/failure.json")))
 
     def test_missing_output_not_satisfied_by_old_file(self):
         self.assertEqual(self.call(), 0)
@@ -179,7 +293,7 @@ class WorkflowTests(unittest.TestCase):
         output = self.root / "output"
         output.mkdir()
         (output / "stats.tsv").write_text("old")
-        transaction = self.root / ".analysis-state/transactions" / ("a" * 32)
+        transaction = self.root / "output/.analysis-state/transactions" / ("a" * 32)
         (transaction / "backup").mkdir(parents=True)
         journal = {"status": "prepared", "entries": [
             {"target": "output/stats.tsv", "existed": True, "original": workflow.snapshot(output / "stats.tsv")},
@@ -203,7 +317,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(before, sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*")))
         workflow.lock(self.root)
         self.assertEqual(self.call(), 1)
-        self.assertTrue((self.root / ".analysis-state/lock.json").exists())
+        self.assertTrue((self.root / "output/.analysis-state/lock.json").exists())
 
     def test_invalid_graph_and_ownership_rejected(self):
         original = copy.deepcopy(self.cfg)
@@ -264,7 +378,7 @@ class WorkflowTests(unittest.TestCase):
         (self.root / "output/user.txt").write_text("keep")
         self.assertEqual(self.call(), 0)
         self.assertEqual((self.root / "output/user.txt").read_text(), "keep")
-        self.assertEqual(list((self.root / ".analysis-state/transactions").iterdir()), [])
+        self.assertEqual(list((self.root / "output/.analysis-state/transactions").iterdir()), [])
 
     def test_force_propagates_even_if_output_content_unchanged(self):
         self.assertEqual(self.call(), 0)
@@ -305,7 +419,7 @@ class WorkflowTests(unittest.TestCase):
             return original(source, destination)
         with mock.patch.object(workflow.os, "replace", side_effect=fail_publication_and_restore):
             self.assertEqual(self.call(), 1)
-        self.assertTrue((self.root / ".analysis-state/lock.json").exists())
+        self.assertTrue((self.root / "output/.analysis-state/lock.json").exists())
         self.manifest.write_text("broken manifest")
         self.assertEqual(self.call("recover", "--confirm-stopped"), 0)
         self.assertEqual(before, self.current())
@@ -318,7 +432,7 @@ class WorkflowTests(unittest.TestCase):
         self.save()
         self.assertEqual(self.call(), 1)
         self.assertEqual(before, self.current())
-        self.assertTrue((self.root / ".analysis-state/lock.json").exists())
+        self.assertTrue((self.root / "output/.analysis-state/lock.json").exists())
         self.assertEqual(self.call("recover", "--confirm-stopped"), 0)
 
     def test_environment_probe_change_triggers_rerun(self):
@@ -348,7 +462,7 @@ class WorkflowTests(unittest.TestCase):
     def test_recovery_refuses_corrupt_backup(self):
         self.assertEqual(self.call(), 0)
         target = self.root / "output/stats.tsv"
-        transaction = self.root / ".analysis-state/transactions" / ("b" * 32)
+        transaction = self.root / "output/.analysis-state/transactions" / ("b" * 32)
         (transaction / "backup").mkdir(parents=True)
         workflow.write_json(transaction / "journal.json", {"status": "prepared", "entries": [
             {"target": "output/stats.tsv", "existed": True, "original": workflow.snapshot(target)}]})
@@ -357,14 +471,14 @@ class WorkflowTests(unittest.TestCase):
         (transaction / "backup/0").write_text("corrupted")
         workflow.lock(self.root)
         self.assertEqual(self.call("recover", "--confirm-stopped"), 1)
-        self.assertTrue((self.root / ".analysis-state/lock.json").exists())
+        self.assertTrue((self.root / "output/.analysis-state/lock.json").exists())
 
     def test_repeat_recovery_after_interrupted_recovery(self):
         output = self.root / "output"
         output.mkdir()
         (output / "a.txt").write_text("old a")
         (output / "b.txt").write_text("old b")
-        transaction = self.root / ".analysis-state/transactions" / ("c" * 32)
+        transaction = self.root / "output/.analysis-state/transactions" / ("c" * 32)
         (transaction / "backup").mkdir(parents=True)
         entries = [{"target": "output/" + name, "existed": True,
                     "original": workflow.snapshot(output / name)} for name in ("a.txt", "b.txt")]
@@ -389,9 +503,9 @@ class WorkflowTests(unittest.TestCase):
     def test_bundled_example_cli_from_other_directory_and_unicode_path(self):
         project = self.root / "中文 project"
         shutil.copytree(SCRIPT.parents[1] / "assets/minimal", project)
-        manifest = project / "workflow.json"
+        manifest = project / "input/workflow.json"
         def cli(action):
-            return subprocess.run([sys.executable, "-X", "utf8", "-B", str(SCRIPT), action, str(manifest)],
+            return subprocess.run([sys.executable, "-X", "utf8", "-B", str(SCRIPT), action, str(manifest), "--root", str(project)],
                                   cwd=self.root, capture_output=True, encoding="utf-8")
         first = cli("run")
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
@@ -564,7 +678,7 @@ class WorkflowTests(unittest.TestCase):
         with mock.patch.object(workflow.os, "replace", side_effect=failure):
             self.assertEqual(self.call(), 1)
         self.assertEqual(before, self.current())
-        journals = list((self.root / ".analysis-state/transactions").glob("*/journal.json"))
+        journals = list((self.root / "output/.analysis-state/transactions").glob("*/journal.json"))
         self.assertTrue(journals)
         original_record = workflow.read_json(journals[0])["entries"][0]["original"]
         self.assertIn("sha256", original_record)

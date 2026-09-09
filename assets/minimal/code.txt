@@ -1,0 +1,38 @@
+"""Single entry point for this module; requires only Python 3.11+."""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", nargs="?", default="run", choices=("run", "plan", "recover"))
+    parser.add_argument("--skill-root", type=Path,
+                        default=os.environ.get("CODE_CDOE_SKILL_ROOT"),
+                        help="Skill directory; alternatively set CODE_CDOE_SKILL_ROOT")
+    parser.add_argument("--target", action="append", default=[])
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--confirm-stopped", action="store_true")
+    parser.add_argument("--legacy-state", action="store_true")
+    args = parser.parse_args()
+    if args.skill_root is None:
+        parser.error("Provide --skill-root or set CODE_CDOE_SKILL_ROOT to the skill directory")
+    runner = args.skill_root.expanduser().resolve() / "scripts" / "analysis_workflow.py"
+    if not runner.is_file():
+        parser.error(f"Workflow runner not found: {runner}")
+    root = Path(__file__).resolve().parent
+    command = [sys.executable, "-B", str(runner), args.action,
+               str(root / "input" / "workflow.json"), "--root", str(root)]
+    for target in args.target:
+        command.extend(("--target", target))
+    for flag in ("force", "confirm_stopped", "legacy_state"):
+        if getattr(args, flag):
+            command.append("--" + flag.replace("_", "-"))
+    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    return subprocess.run(command, cwd=root, env=environment, shell=False).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
